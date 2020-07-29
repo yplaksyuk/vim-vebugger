@@ -5,14 +5,16 @@ function! vebugger#xdebug#start()
 	let l:debugger=vebugger#std#startDebugger(shellescape(l:debuggerExe)
 				\.' '.s:script_dir_path.'/xdebug_wrapper.py ')
 
-	let l:debugger.state.xdebug={}
+	let l:debugger.state.xdebug={'shellBuffer':0}
 
-	"if !has('win32')
-	"	call vebugger#std#openShellBuffer(l:debugger)
-	"endif
+	if !has('win32')
+		call vebugger#std#openShellBuffer(l:debugger)
+		let l:debugger.state.xdebug.shellBuffer=1
+	endif
 
 	call l:debugger.addReadHandler(function('vebugger#xdebug#_readProgramOutput'))
-	call l:debugger.addReadHandler(function('vebugger#xdebug#_readWhere'))
+	call l:debugger.addReadHandler(function('vebugger#xdebug#_readLocation'))
+	call l:debugger.addReadHandler(function('vebugger#xdebug#_readLog'))
 	call l:debugger.addReadHandler(function('vebugger#xdebug#_readFinish'))
 	call l:debugger.addReadHandler(function('vebugger#xdebug#_readEvaluatedExpressions'))
 
@@ -30,14 +32,14 @@ function! vebugger#xdebug#start()
 endfunction
 
 function! vebugger#xdebug#_readProgramOutput(pipeName,line,readResult,debugger)
-	if 'out'==a:pipeName && (a:line=~'\v^program_stdout:' || a:line=~'\v^program_stderr:')
-		let a:readResult.std.programOutput={'line':strpart(a:line, 16)}
+	if 'out'==a:pipeName && (a:line=~'\v^dbgp_out:' || a:line=~'\v^dbgp_err:')
+		let a:readResult.std.programOutput={'line':strpart(a:line, 9)}
 	endif
 endfunction
 
-function! vebugger#xdebug#_readWhere(pipeName,line,readResult,debugger)
-	if 'out'==a:pipeName && a:line=~'\v^where:'
-		let l:matches=matchlist(a:line,'\v^where:\s([^:]+):(\d+)')
+function! vebugger#xdebug#_readLocation(pipeName,line,readResult,debugger)
+	if 'out'==a:pipeName && a:line=~'\v^dbgp_loc:'
+		let l:matches=matchlist(a:line,'\v^dbgp_loc:\s([^:]+):(\d+)')
 		if 2<len(l:matches)
 			let l:file=l:matches[1]
 			let l:file=fnamemodify(l:file,':p')
@@ -48,8 +50,15 @@ function! vebugger#xdebug#_readWhere(pipeName,line,readResult,debugger)
 	endif
 endfunction
 
+function! vebugger#xdebug#_readLog(pipeName,line,readResult,debugger)
+	if 'out'==a:pipeName && a:line=~'\v^dbgp_log:'
+		let a:readResult.std.programOutput={'line':'xdebug: '.strpart(a:line, 9)}
+	endif
+endfunction
+
 function! vebugger#xdebug#_readFinish(pipeName,line,readResult,debugger)
-	if 'out'==a:pipeName && a:line=~'\v^program_state:\sExited'
+	if 'out'==a:pipeName && a:line=~'\v^dbgp_end:'
+		let a:readResult.std.programOutput={'line':'xdebug: Finished. '.strpart(a:line, 9)}
 		let a:readResult.std.programFinish={'finish':1}
 	endif
 endfunction
@@ -75,7 +84,7 @@ function! vebugger#xdebug#_writeBreakpoints(writeAction,debugger)
 		if 'add'==(l:breakpoint.action)
 			call a:debugger.writeLine('breakpoint_set -t line -f '.fnameescape(l:breakpoint.file).' -n '.l:breakpoint.line)
 		elseif 'remove'==l:breakpoint.action
-			call a:debugger.writeLine('breakpint_remove -t line -f '.fnameescape(l:breakpoint.file).' -n '.l:breakpoint.line)
+			call a:debugger.writeLine('breakpoint_remove -t line -f '.fnameescape(l:breakpoint.file).' -n '.l:breakpoint.line)
 		endif
 	endfor
 endfunction

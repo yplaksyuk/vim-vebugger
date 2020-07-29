@@ -1,3 +1,4 @@
+import base64
 import socket
 import threading
 import xml.etree.ElementTree as et
@@ -21,20 +22,30 @@ class dbgp_reader (threading.Thread):
                 self.init(root)
 
     def response(self, root):
-        message = root.find('{https://xdebug.org/dbgp/xdebug}message')
-        if not message is None:
-            filename = message.get('filename')
-            lineno = message.get('lineno')
-            if filename and lineno:
-                self.server_.write("where: " + filename[7:] + ":" + lineno)
+        transaction_id = root.get('transaction_id')
+        command = root.get('command')
+        if command == 'breakpoint_set':
+            self.server_.breakpoint_update(root.get('id'), transaction_id)
+        else:
+            message = root.find('{https://xdebug.org/dbgp/xdebug}message')
+            if not message is None:
+                filename = message.get('filename')
+                lineno = message.get('lineno')
+                if filename and lineno:
+                    self.server_.location(filename[7:], lineno)
+            else:
+                self.server_.log(et.tostring(root))
 
     def stream(self, root):
+        self.server_.log(et.tostring(root))
         pass
 
     def notify(self, root):
+        self.server_.log(et.tostring(root))
         pass
 
     def init(self, root):
+        self.server_.log(et.tostring(root))
         pass
 
 class dbgp_writer (threading.Thread):
@@ -46,12 +57,27 @@ class dbgp_writer (threading.Thread):
     def run(self):
         self.server_.log("dbgp_writer started...")
         while self.server_.valid():
-            [ cmd, *args ] = self.server_.read().split(" ", 1)
-            self.command(cmd, args)
+            cmdline, *data = self.server_.read().split(" -- ", 1)
+            for i in range(len(data)):
+                data[i] = base64.b64encode(data[i].encode('utf-8')).decode('utf-8')
 
-    def command(self, cmd, args):
-        command = " ".join([cmd, "-i", self.next_id()] + args)
-        self.server_.send(command);
+            cmd, *args = cmdline.split(" ", 1)
+            self.command(cmd, args, data, self.next_id())
+
+    def command(self, cmd, args, data, transaction_id):
+        if cmd == 'breakpoint_set':
+            self.server_.breakpoint_queue(args[0], transaction_id)
+        elif cmd == 'breakpoint_remove':
+            breakpoint_id = self.server_.breakpoint_find(args[0])
+            self.server_.breakpoint_remove(args[0])
+            args = [ "-d " + breakpoint_id ]
+
+        cmdlist = [ cmd, "-i", transaction_id ] + args
+        if len(data) > 0:
+            cmdlist.append("--")
+            cmdlist += data
+
+        self.server_.send(" ".join(cmdlist));
 
     def next_id(self):
         self.id_ = self.id_ + 1
@@ -62,12 +88,15 @@ class dbgp_server:
         self.sock_ = None
         self.valid_ = True
 
+        self.breakpoints_queue_ = { }
+        self.breakpoints_ = { }
+
     def run(self):
         server = socket.socket()
         server.bind(('localhost', 9000))
 
         server.listen(1)
-        self.log("Listenning on port 9000...")
+        self.log("Listenning on localhost:9000...")
 
         self.sock_, addr = server.accept()
         self.log("Connection from: " + str(addr))
@@ -82,10 +111,25 @@ class dbgp_server:
         writer.join()
 
         server.close()
-        self.write('program_state: Exited')
+        self.end("OK")
 
     def valid(self):
         return self.valid_
+
+    def breakpoint_queue(self, spec, transaction_id):
+        self.breakpoints_queue_[transaction_id] = spec
+
+    def breakpoint_update(self, breakpoint_id, transaction_id):
+        spec = self.breakpoints_queue_[transaction_id]
+        if spec:
+            self.breakpoints_[spec] = breakpoint_id
+            del self.breakpoints_queue_[transaction_id]
+
+    def breakpoint_find(self, spec):
+        return self.breakpoints_[spec]
+
+    def breakpoint_remove(self, spec):
+        del self.breakpoints_[spec]
 
     def recv(self):
         if self.valid_:
@@ -108,6 +152,7 @@ class dbgp_server:
     def send(self, cmd):
         if self.valid_:
             try:
+                self.log(cmd)
                 self.sock_.send(cmd.encode('utf-8') + b'\x00')
             except:
                 self.valid_ = False
@@ -118,11 +163,20 @@ class dbgp_server:
     def read(self):
         return input()
 
-    def write(self, text):
-        print(text)
+    def stdout(self, text):
+        print("dbgp_out:" + text)
+
+    def stderr(self, text):
+        print("dbgp_err:" + text)
+
+    def location(self, filename, lineno):
+        print("dbgp_loc:" + filename + ":" + lineno)
 
     def log(self, message):
-        print("dbgp: " + message)
+        print("dbgp_log: " + message)
+
+    def end(self, status):
+        print("dbgp_end:" + status)
 
 if __name__ == '__main__':
     server = dbgp_server()
